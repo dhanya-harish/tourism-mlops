@@ -14,6 +14,7 @@ import os
 import sys
 from pathlib import Path
 from textwrap import dedent
+from string import Template
 from huggingface_hub import login, HfApi, create_repo, upload_folder
 from huggingface_hub.utils import HfHubHTTPError
 
@@ -22,7 +23,7 @@ from huggingface_hub.utils import HfHubHTTPError
 # ---------------------------
 HF_TOKEN   = os.getenv("HF_TOKEN")
 SPACE_ID   = os.getenv("SPACE_ID")          # e.g., "dhani10/tourism-app"
-MODEL_REPO = os.getenv("MODEL_REPO") or os.getenv("MODEL_REPOID")  # allow old name
+MODEL_REPO = os.getenv("MODEL_REPO") or os.getenv("MODEL_REPOID")
 MODEL_FILE = os.getenv("MODEL_FILE", "model/best_model.joblib")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR")        # optional
 
@@ -66,18 +67,18 @@ reqs   = upload_dir / "requirements.txt"
 
 if not app_py.exists():
     print("[deploy] 'app.py' not found. Generating a minimal Streamlit app that loads the model from the Hub…")
-    app_py.write_text(dedent(f"""
+    app_code = Template(dedent(r"""
         import os, joblib, pandas as pd, streamlit as st
         from huggingface_hub import hf_hub_download, login
 
         st.set_page_config(page_title="Wellness Tourism Predictor", layout="centered")
         st.title("🌍 Wellness Tourism Package Purchase Predictor")
 
-        HF_TOKEN = os.getenv("HF_TOKEN")  # optional if model is public
-        HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "{MODEL_REPO}")
-        MODEL_FILE = os.getenv("MODEL_FILE", "{MODEL_FILE}")
+        HF_TOKEN = os.getenv("HF_TOKEN")
+        HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "$MODEL_REPO")
+        MODEL_FILE = os.getenv("MODEL_FILE", "$MODEL_FILE")
 
-        # Use a writable cache on Spaces
+        # Writable cache on Spaces
         os.environ.setdefault("HF_HOME", "/tmp/huggingface")
         os.environ.setdefault("HF_HUB_CACHE", "/tmp/huggingface/hub")
         os.makedirs(os.environ["HF_HUB_CACHE"], exist_ok=True)
@@ -122,10 +123,11 @@ if not app_py.exists():
             else:
                 proba = None
             if pred == 1:
-                st.success(f"✅ Likely to purchase (conf {{proba:.2f}})" if proba is not None else "✅ Likely to purchase")
+                st.success(f"✅ Likely to purchase (conf {proba:.2f})" if proba is not None else "✅ Likely to purchase")
             else:
-                st.error(f"❌ Not likely (conf {{1-proba:.2f}})" if proba is not None else "❌ Not likely to purchase")
-    """).strip() + "\n")
+                st.error(f"❌ Not likely (conf {1-proba:.2f})" if proba is not None else "❌ Not likely to purchase")
+    """)).substitute(MODEL_REPO=MODEL_REPO, MODEL_FILE=MODEL_FILE)
+    app_py.write_text(app_code)
 
 if not reqs.exists():
     print("[deploy] 'requirements.txt' not found. Generating a minimal one…")
@@ -149,7 +151,7 @@ try:
         private=True,
         exist_ok=True,
         token=HF_TOKEN,
-        # do not pass space_sdk here (older backends may reject)
+        # do not pass space_sdk (older backends may reject it)
     )
 except HfHubHTTPError as e:
     print(f"[deploy][warn] create_repo returned: {e}")
@@ -183,7 +185,7 @@ except Exception as e:
     print(f"[deploy][info] Could not set Space secret HF_TOKEN (continuing): {e}")
 
 # ---------------------------
-# Upload files
+# Upload files & restart
 # ---------------------------
 print(f"[deploy] Uploading folder to Space: {upload_dir}")
 upload_folder(
@@ -194,9 +196,6 @@ upload_folder(
 )
 print("[deploy] Upload complete.")
 
-# ---------------------------
-# Restart Space
-# ---------------------------
 try:
     api.restart_space(repo_id=SPACE_ID, token=HF_TOKEN)
     print("[deploy] Space restart triggered.")
