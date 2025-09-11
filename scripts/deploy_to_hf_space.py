@@ -141,22 +141,22 @@ if not reqs.exists():
     """).strip() + "\n")
 
 # ---------------------------
-# Create/ensure the Space
+# Create/ensure the Space (now *with* space_sdk)
 # ---------------------------
 print("[deploy] Ensuring Space exists…")
 try:
     create_repo(
         repo_id=SPACE_ID,
         repo_type="space",
+        space_sdk="streamlit",     # <-- REQUIRED by your hub client
         private=True,
         exist_ok=True,
         token=HF_TOKEN,
-        # do not pass space_sdk (older backends may reject it)
     )
 except HfHubHTTPError as e:
     print(f"[deploy][warn] create_repo returned: {e}")
 
-# Try to set runtime to Streamlit (best-effort)
+# Also try to set runtime (best-effort)
 try:
     api.update_space_runtime(
         repo_id=SPACE_ID,
