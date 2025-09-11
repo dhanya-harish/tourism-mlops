@@ -1,0 +1,51 @@
+name: CI/CD Pipeline for MLOps Project
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Data Preparation
+        run: |
+          python <<'EOF'
+          # --- your Python data prep code ---
+          EOF
+
+      - name: Run Model Training and Registration
+        run: |
+          python <<'EOF'
+          # --- your model training code ---
+          EOF
+
+      - name: Deploy to Hugging Face Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python deploy_to_hf_space.py \
+            --space-id dhani10/tourism-app \
+            --sdk streamlit \
+            --hardware cpu-basic \
+            --path . \
+            --set-secret HF_TOKEN=${HF_TOKEN} \
+            --set-var HF_MODEL_REPO=dhani10/tourism-model \
+            --set-var MODEL_FILE=model/best_model.joblib
