@@ -1,7 +1,18 @@
 
-streamlit
-pandas
-numpy
-scikit-learn
-joblib
-huggingface_hub
+# Core ML stack
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.4.2
+joblib==1.4.2
+
+# Hugging Face
+huggingface-hub==0.30.1
+datasets==2.20.0
+
+# App (for Spaces)
+streamlit==1.36.0
+
+# Optional: plotting & metrics (safe to include for debugging)
+matplotlib==3.9.0
+seaborn==0.13.2
+
