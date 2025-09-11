@@ -1,138 +1,213 @@
 #!/usr/bin/env python3
 """
-Deploy files to a Hugging Face Space.
+Deploy a Streamlit Space that loads a scikit-learn pipeline from the HF Hub.
 
-Usage (matches your workflow step):
-  python deploy_to_hf_space.py \
-    --space-id dhani10/tourism-app \
-    --sdk streamlit \
-    --hardware cpu-basic \
-    --path . \
-    --set-secret HF_TOKEN=$HF_TOKEN \
-    --set-var HF_MODEL_REPO=dhani10/tourism-model \
-    --set-var MODEL_FILE=model/best_model.joblib
+Reads configuration from environment variables:
+  HF_TOKEN     (required)  - HF access token (use a GitHub Secret)
+  SPACE_ID     (required)  - e.g. "username/space-name"
+  MODEL_REPOID (required)  - e.g. "username/model-repo"
+  MODEL_FILE   (optional)  - e.g. "model/best_model.joblib" (default)
+  UPLOAD_DIR   (optional)  - directory to upload to Space (defaults to "space/" if exists else repo root)
+
+This script is idempotent: safe to re-run.
 """
 
-import argparse
 import os
+import sys
 from pathlib import Path
+from textwrap import dedent
 from huggingface_hub import login, HfApi, create_repo, upload_folder
 from huggingface_hub.utils import HfHubHTTPError
 
-def parse_kv_list(items):
-    """Convert ["KEY=VALUE", ...] into dict."""
-    out = {}
-    if not items:
-        return out
-    for s in items:
-        if "=" not in s:
-            raise argparse.ArgumentTypeError(f"Expected KEY=VALUE, got: {s}")
-        k, v = s.split("=", 1)
-        out[k] = v
-    return out
+# ---------------------------
+# Read environment variables
+# ---------------------------
+HF_TOKEN     = os.getenv("HF_TOKEN")
+SPACE_ID     = os.getenv("SPACE_ID")      # e.g., "dhani10/tourism-app"
+MODEL_REPOID = os.getenv("MODEL_REPOID")  # e.g., "dhani10/tourism-model"
+MODEL_FILE   = os.getenv("MODEL_FILE", "model/best_model.joblib")
+UPLOAD_DIR   = os.getenv("UPLOAD_DIR")    # optional
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--space-id", required=True, help="e.g. user/space-name")
-    p.add_argument("--path", default=".", help="Folder to upload (default: .)")
-    p.add_argument("--sdk", choices=["streamlit", "docker"], default="streamlit",
-                   help="Space runtime SDK (default: streamlit)")
-    p.add_argument("--hardware", default="cpu-basic",
-                   help="Space hardware (e.g. cpu-basic, t4-small)")
-    p.add_argument("--set-secret", nargs="*", help="Secrets as KEY=VALUE")
-    p.add_argument("--set-var", nargs="*", help="Variables as KEY=VALUE")
-    args = p.parse_args()
+if not HF_TOKEN:
+    sys.exit("HF_TOKEN env var is required (GitHub Secret).")
+if not SPACE_ID:
+    sys.exit("SPACE_ID env var is required (e.g., 'username/space-name').")
+if not MODEL_REPOID:
+    sys.exit("MODEL_REPOID env var is required (e.g., 'username/model-repo').")
 
-    hf_token = os.getenv("HF_TOKEN")
-    if not hf_token:
-        raise SystemExit("HF_TOKEN env var is required (GitHub Secret).")
+print(f"[deploy] SPACE_ID={SPACE_ID}")
+print(f"[deploy] MODEL_REPOID={MODEL_REPOID}")
+print(f"[deploy] MODEL_FILE={MODEL_FILE}")
 
-    login(token=hf_token)
-    api = HfApi(token=hf_token)
+# ---------------------------
+# Login and API client
+# ---------------------------
+print("[deploy] Logging in to Hugging Face…")
+login(HF_TOKEN)
+api = HfApi(token=HF_TOKEN)
 
-    space_id = args.space_id
-    root = Path(args.path).resolve()
+# ---------------------------
+# Pick upload directory
+# ---------------------------
+repo_root = Path(".").resolve()
+default_space_dir = repo_root / "space"
+if UPLOAD_DIR:
+    upload_dir = Path(UPLOAD_DIR).resolve()
+elif default_space_dir.exists():
+    upload_dir = default_space_dir
+else:
+    # Fall back to a minimal set from repo root
+    upload_dir = repo_root
 
-    # Create or ensure Space exists (avoid passing sdk at creation on older hubs)
-    try:
-        exists = api.repo_exists(space_id, repo_type="space")
-    except Exception:
-        exists = False
+print(f"[deploy] Using upload folder: {upload_dir}")
 
-    if not exists:
-        try:
-            create_repo(
-                repo_id=space_id,
-                repo_type="space",
-                private=True,
-                exist_ok=False,
-                token=hf_token,
+# ---------------------------
+# Ensure minimal app files exist (if not provided)
+# ---------------------------
+app_py = upload_dir / "app.py"
+reqs  = upload_dir / "requirements.txt"
+
+if not app_py.exists():
+    print("[deploy] 'app.py' not found. Generating a minimal Streamlit app that loads the model from the Hub…")
+    app_py.write_text(dedent(f"""
+        import os, joblib, pandas as pd, streamlit as st
+        from huggingface_hub import hf_hub_download, login
+
+        st.set_page_config(page_title="Wellness Tourism Predictor", layout="centered")
+        st.title("🌍 Wellness Tourism Package Purchase Predictor")
+
+        HF_TOKEN = os.getenv("HF_TOKEN")  # optional if model is public
+        HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "{MODEL_REPOID}")
+        MODEL_FILE = os.getenv("MODEL_FILE", "{MODEL_FILE}")
+
+        # Use a writable cache on Spaces
+        os.environ.setdefault("HF_HOME", "/tmp/huggingface")
+        os.environ.setdefault("HF_HUB_CACHE", "/tmp/huggingface/hub")
+        os.makedirs(os.environ["HF_HUB_CACHE"], exist_ok=True)
+
+        if HF_TOKEN:
+            try:
+                login(HF_TOKEN)
+            except Exception:
+                pass
+
+        @st.cache_resource
+        def load_model():
+            p = hf_hub_download(
+                repo_id=HF_MODEL_REPO,
+                filename=MODEL_FILE,
+                repo_type="model",
+                token=HF_TOKEN,
+                cache_dir=os.environ["HF_HUB_CACHE"],
             )
-            print(f"[info] Created Space: {space_id}")
-        except HfHubHTTPError as e:
-            if "already exists" in str(e).lower():
-                print("[info] Space already exists.")
+            return joblib.load(p)
+
+        model = load_model()
+
+        Age = st.number_input("Age", 18, 100, 30)
+        Gender = st.selectbox("Gender", ["Male", "Female"])
+        CityTier = st.selectbox("City Tier", [1,2,3])
+        Occupation = st.selectbox("Occupation", ["Salaried","Freelancer","Other"])
+        Trips = st.slider("Trips / year", 0, 20, 2)
+        Passport = st.selectbox("Has Passport?", [0,1], index=0)
+        OwnCar = st.selectbox("Owns Car?", [0,1], index=0)
+        Income = st.number_input("Monthly Income", 0, 10_000_000, 50_000, step=1_000)
+
+        if st.button("Predict"):
+            row = pd.DataFrame([{
+                "Age": Age, "Gender": Gender, "CityTier": CityTier,
+                "Occupation": Occupation, "NumberOfTrips": Trips,
+                "Passport": Passport, "OwnCar": OwnCar, "MonthlyIncome": float(Income)
+            }])
+            pred = model.predict(row)[0]
+            if hasattr(model, "predict_proba"):
+                proba = float(model.predict_proba(row)[0,1])
             else:
-                print(f"[warn] create_repo: {e}")
+                proba = None
+            if pred == 1:
+                st.success(f"✅ Likely to purchase (conf {{proba:.2f}})" if proba is not None else "✅ Likely to purchase")
+            else:
+                st.error(f"❌ Not likely (conf {{1-proba:.2f}})" if proba is not None else "❌ Not likely to purchase")
+    """).strip() + "\n")
 
-    # Try to set runtime (newer client supports update_space_runtime)
-    try:
-        api.update_space_runtime(
-            repo_id=space_id,
-            sdk=args.sdk,
-            hardware=args.hardware,
-            token=hf_token,
-        )
-        print(f"[info] Runtime set: sdk={args.sdk}, hw={args.hardware}")
-    except Exception as e:
-        print(f"[info] update_space_runtime not available or failed: {e}")
+if not reqs.exists():
+    print("[deploy] 'requirements.txt' not found. Generating a minimal one…")
+    reqs.write_text(dedent("""
+        streamlit
+        pandas
+        numpy
+        scikit-learn
+        joblib
+        huggingface_hub
+    """).strip() + "\n")
 
-    # Upload files
-    if not root.exists():
-        raise SystemExit(f"Path not found: {root}")
-
-    # If using Streamlit SDK, make sure only needed files are present
-    # (app.py and requirements.txt at minimum). This avoids accidental Docker use.
-    if args.sdk == "streamlit":
-        must_have = ["app.py", "requirements.txt"]
-        missing = [f for f in must_have if not (root / f).exists()]
-        if missing:
-            raise SystemExit(f"Missing required files for Streamlit SDK: {missing}")
-        # Warn if a Dockerfile is present (it would force Docker runtime)
-        if (root / "Dockerfile").exists():
-            print("[warn] Dockerfile found. Delete it to ensure Streamlit SDK is used.")
-
-    upload_folder(
-        folder_path=str(root),
-        repo_id=space_id,
+# ---------------------------
+# Create/ensure the Space
+# ---------------------------
+print("[deploy] Ensuring Space exists…")
+try:
+    # create_repo is idempotent with exist_ok=True
+    create_repo(
+        repo_id=SPACE_ID,
         repo_type="space",
-        token=hf_token,
+        private=True,
+        exist_ok=True,
+        token=HF_TOKEN,
+        # IMPORTANT: do NOT pass space_sdk here for older backends that reject it
     )
-    print("[info] Files uploaded.")
+except HfHubHTTPError as e:
+    print(f"[deploy][warn] create_repo returned: {e}")
 
-    # Add secrets and variables if provided
-    for k, v in parse_kv_list(args.set_secret).items():
-        try:
-            api.add_space_secret(repo_id=space_id, key=k, value=v)
-            print(f"[info] Secret set: {k}")
-        except Exception as e:
-            print(f"[warn] add_space_secret({k}): {e}")
+# Try to set runtime to Streamlit (best-effort; some hub clients don’t expose it)
+try:
+    # Some client versions have update_space_runtime; if not, this will raise
+    api.update_space_runtime(
+        repo_id=SPACE_ID,
+        sdk="streamlit",
+        hardware="cpu-basic",
+        token=HF_TOKEN,
+    )
+    print("[deploy] Space runtime set to Streamlit (cpu-basic).")
+except Exception as e:
+    print(f"[deploy][info] Could not explicitly set runtime (continuing): {e}")
 
-    for k, v in parse_kv_list(args.set_var).items():
-        try:
-            api.add_space_variable(repo_id=space_id, key=k, value=v)
-            print(f"[info] Variable set: {k}={v}")
-        except Exception as e:
-            print(f"[warn] add_space_variable({k}): {e}")
+# ---------------------------
+# Optionally set Space secrets/vars (best-effort)
+# ---------------------------
+# Make your model repo id & file available to the app:
+try:
+    api.add_space_variable(repo_id=SPACE_ID, key="HF_MODEL_REPO", value=MODEL_REPOID)
+    api.add_space_variable(repo_id=SPACE_ID, key="MODEL_FILE", value=MODEL_FILE)
+    print("[deploy] Set Space variables HF_MODEL_REPO and MODEL_FILE.")
+except Exception as e:
+    print(f"[deploy][info] Could not set Space variables (continuing): {e}")
 
-    # Restart Space (best effort)
-    try:
-        api.restart_space(repo_id=space_id, token=hf_token)
-        print("[info] Space restart requested.")
-    except Exception as e:
-        print(f"[info] restart_space not available or failed: {e}")
+# If your model repo is private, the app will need HF_TOKEN at runtime:
+try:
+    api.add_space_secret(repo_id=SPACE_ID, key="HF_TOKEN", value=HF_TOKEN)
+    print("[deploy] Set Space secret HF_TOKEN.")
+except Exception as e:
+    print(f"[deploy][info] Could not set Space secret HF_TOKEN (continuing): {e}")
 
-    print(f"✅ Deployed to https://huggingface.co/spaces/{space_id}")
+# ---------------------------
+# Upload files
+# ---------------------------
+print(f"[deploy] Uploading folder to Space: {upload_dir}")
+upload_folder(
+    folder_path=str(upload_dir),
+    repo_id=SPACE_ID,
+    repo_type="space",
+    token=HF_TOKEN,
+)
+print("[deploy] Upload complete.")
 
-if __name__ == "__main__":
-    main()
+# ---------------------------
+# Restart Space
+# ---------------------------
+try:
+    api.restart_space(repo_id=SPACE_ID, token=HF_TOKEN)
+    print("[deploy] Space restart triggered.")
+except Exception as e:
+    print(f"[deploy][info] Could not restart Space (continuing): {e}")
+
+print(f"[deploy] ✅ Deployed to https://huggingface.co/spaces/{SPACE_ID}")
