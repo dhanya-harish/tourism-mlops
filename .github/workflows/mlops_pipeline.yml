@@ -1,44 +1,80 @@
-# .github/workflows/mlops_pipeline.yml
 name: CI/CD Pipeline for MLOps Project
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+
+    # Global env for all steps (you can change these repo IDs)
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      DATASET_REPO: dhani10/tourism-app-dataset
+      MODEL_REPO: dhani10/tourism-model
+      SPACE_ID: dhani10/tourism-app
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
+          python -V
           pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # Fallback in case requirements.txt is missing
+            pip install pandas numpy scikit-learn datasets huggingface_hub joblib streamlit
+          fi
+          pip list
 
+      # ---------- DATA PREPARATION ----------
       - name: Run Data Preparation
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python scripts/data_prep.py
-
-      - name: Run Model Training and Registration
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DATASET_REPO: ${{ env.DATASET_REPO }}
+
+      # ---------- TRAIN + REGISTER MODEL ----------
+      - name: Run Model Training and Registration
         run: |
           python scripts/train_and_register.py
-
-      - name: Deploy to Hugging Face Spaces
-        env:                         # <-- exposes the secret to the step
+        env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          SPACE_ID: dhani10/tourism-app
-          MODEL_REPOID: dhani10/tourism-model
+          DATASET_REPO: ${{ env.DATASET_REPO }}
+          MODEL_REPO: ${{ env.MODEL_REPO }}
+
+      # ---------- DEPLOY TO HF SPACES ----------
+      - name: Deploy to Hugging Face Spaces
+        if: ${{ env.HF_TOKEN != '' }}
         run: |
-          python deploy_to_hf_space.py
+          python scripts/deploy_to_hf_space.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE_ID: ${{ env.SPACE_ID }}
+          MODEL_REPO: ${{ env.MODEL_REPO }}
+
+      # (Optional) Upload logs/artifacts if you generate any
+      # - name: Upload artifacts
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: pipeline-artifacts
+      #     path: artifacts/**
