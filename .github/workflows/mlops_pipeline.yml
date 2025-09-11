@@ -1,22 +1,20 @@
+# .github/workflows/mlops_pipeline.yml
 name: CI/CD Pipeline for MLOps Project
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
@@ -26,26 +24,21 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Data Preparation
-        run: |
-          python <<'EOF'
-          # --- your Python data prep code ---
-          EOF
-
-      - name: Run Model Training and Registration
-        run: |
-          python <<'EOF'
-          # --- your model training code ---
-          EOF
-
-      - name: Deploy to Hugging Face Spaces
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python deploy_to_hf_space.py \
-            --space-id dhani10/tourism-app \
-            --sdk streamlit \
-            --hardware cpu-basic \
-            --path . \
-            --set-secret HF_TOKEN=${HF_TOKEN} \
-            --set-var HF_MODEL_REPO=dhani10/tourism-model \
-            --set-var MODEL_FILE=model/best_model.joblib
+          python scripts/data_prep.py
+
+      - name: Run Model Training and Registration
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python scripts/train_and_register.py
+
+      - name: Deploy to Hugging Face Spaces
+        env:                         # <-- exposes the secret to the step
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE_ID: dhani10/tourism-app
+          MODEL_REPOID: dhani10/tourism-model
+        run: |
+          python deploy_to_hf_space.py
