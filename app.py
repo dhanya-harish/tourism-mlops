@@ -5,6 +5,9 @@ import numpy as np
 import streamlit as st
 from huggingface_hub import hf_hub_download, login
 
+# MUST be the first Streamlit command
+st.set_page_config(page_title="Tourism Wellness Package Predictor", layout="centered")
+
 # ----------------------------
 # HF auth & writable cache (/tmp)
 # ----------------------------
