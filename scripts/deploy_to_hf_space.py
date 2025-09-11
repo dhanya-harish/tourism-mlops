@@ -2,14 +2,12 @@
 """
 Deploy a Streamlit Space that loads a scikit-learn pipeline from the HF Hub.
 
-Reads configuration from environment variables:
-  HF_TOKEN     (required)  - HF access token (use a GitHub Secret)
-  SPACE_ID     (required)  - e.g. "username/space-name"
-  MODEL_REPOID (required)  - e.g. "username/model-repo"
-  MODEL_FILE   (optional)  - e.g. "model/best_model.joblib" (default)
-  UPLOAD_DIR   (optional)  - directory to upload to Space (defaults to "space/" if exists else repo root)
-
-This script is idempotent: safe to re-run.
+Env vars expected (aligned with mlops_pipeline.yml):
+  HF_TOKEN    (required)   - HF access token (GitHub Secret)
+  SPACE_ID    (required)   - e.g. "username/space-name"
+  MODEL_REPO  (required)   - e.g. "username/model-repo"
+  MODEL_FILE  (optional)   - path in model repo (default: "model/best_model.joblib")
+  UPLOAD_DIR  (optional)   - folder to upload to Space (default: "space/" if exists else repo root)
 """
 
 import os
@@ -22,21 +20,21 @@ from huggingface_hub.utils import HfHubHTTPError
 # ---------------------------
 # Read environment variables
 # ---------------------------
-HF_TOKEN     = os.getenv("HF_TOKEN")
-SPACE_ID     = os.getenv("SPACE_ID")      # e.g., "dhani10/tourism-app"
-MODEL_REPOID = os.getenv("MODEL_REPOID")  # e.g., "dhani10/tourism-model"
-MODEL_FILE   = os.getenv("MODEL_FILE", "model/best_model.joblib")
-UPLOAD_DIR   = os.getenv("UPLOAD_DIR")    # optional
+HF_TOKEN   = os.getenv("HF_TOKEN")
+SPACE_ID   = os.getenv("SPACE_ID")          # e.g., "dhani10/tourism-app"
+MODEL_REPO = os.getenv("MODEL_REPO") or os.getenv("MODEL_REPOID")  # allow old name
+MODEL_FILE = os.getenv("MODEL_FILE", "model/best_model.joblib")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR")        # optional
 
 if not HF_TOKEN:
     sys.exit("HF_TOKEN env var is required (GitHub Secret).")
 if not SPACE_ID:
     sys.exit("SPACE_ID env var is required (e.g., 'username/space-name').")
-if not MODEL_REPOID:
-    sys.exit("MODEL_REPOID env var is required (e.g., 'username/model-repo').")
+if not MODEL_REPO:
+    sys.exit("MODEL_REPO env var is required (e.g., 'username/model-repo').")
 
 print(f"[deploy] SPACE_ID={SPACE_ID}")
-print(f"[deploy] MODEL_REPOID={MODEL_REPOID}")
+print(f"[deploy] MODEL_REPO={MODEL_REPO}")
 print(f"[deploy] MODEL_FILE={MODEL_FILE}")
 
 # ---------------------------
@@ -56,7 +54,6 @@ if UPLOAD_DIR:
 elif default_space_dir.exists():
     upload_dir = default_space_dir
 else:
-    # Fall back to a minimal set from repo root
     upload_dir = repo_root
 
 print(f"[deploy] Using upload folder: {upload_dir}")
@@ -65,7 +62,7 @@ print(f"[deploy] Using upload folder: {upload_dir}")
 # Ensure minimal app files exist (if not provided)
 # ---------------------------
 app_py = upload_dir / "app.py"
-reqs  = upload_dir / "requirements.txt"
+reqs   = upload_dir / "requirements.txt"
 
 if not app_py.exists():
     print("[deploy] 'app.py' not found. Generating a minimal Streamlit app that loads the model from the Hub…")
@@ -77,7 +74,7 @@ if not app_py.exists():
         st.title("🌍 Wellness Tourism Package Purchase Predictor")
 
         HF_TOKEN = os.getenv("HF_TOKEN")  # optional if model is public
-        HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "{MODEL_REPOID}")
+        HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "{MODEL_REPO}")
         MODEL_FILE = os.getenv("MODEL_FILE", "{MODEL_FILE}")
 
         # Use a writable cache on Spaces
@@ -146,21 +143,19 @@ if not reqs.exists():
 # ---------------------------
 print("[deploy] Ensuring Space exists…")
 try:
-    # create_repo is idempotent with exist_ok=True
     create_repo(
         repo_id=SPACE_ID,
         repo_type="space",
         private=True,
         exist_ok=True,
         token=HF_TOKEN,
-        # IMPORTANT: do NOT pass space_sdk here for older backends that reject it
+        # do not pass space_sdk here (older backends may reject)
     )
 except HfHubHTTPError as e:
     print(f"[deploy][warn] create_repo returned: {e}")
 
-# Try to set runtime to Streamlit (best-effort; some hub clients don’t expose it)
+# Try to set runtime to Streamlit (best-effort)
 try:
-    # Some client versions have update_space_runtime; if not, this will raise
     api.update_space_runtime(
         repo_id=SPACE_ID,
         sdk="streamlit",
@@ -172,17 +167,15 @@ except Exception as e:
     print(f"[deploy][info] Could not explicitly set runtime (continuing): {e}")
 
 # ---------------------------
-# Optionally set Space secrets/vars (best-effort)
+# Set Space variables / secrets (best-effort)
 # ---------------------------
-# Make your model repo id & file available to the app:
 try:
-    api.add_space_variable(repo_id=SPACE_ID, key="HF_MODEL_REPO", value=MODEL_REPOID)
+    api.add_space_variable(repo_id=SPACE_ID, key="HF_MODEL_REPO", value=MODEL_REPO)
     api.add_space_variable(repo_id=SPACE_ID, key="MODEL_FILE", value=MODEL_FILE)
     print("[deploy] Set Space variables HF_MODEL_REPO and MODEL_FILE.")
 except Exception as e:
     print(f"[deploy][info] Could not set Space variables (continuing): {e}")
 
-# If your model repo is private, the app will need HF_TOKEN at runtime:
 try:
     api.add_space_secret(repo_id=SPACE_ID, key="HF_TOKEN", value=HF_TOKEN)
     print("[deploy] Set Space secret HF_TOKEN.")
