@@ -9,12 +9,12 @@ jobs:
   run-pipeline:
     runs-on: ubuntu-latest
 
-    # Global env for all steps (you can change these repo IDs)
     env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      DATASET_REPO: dhani10/tourism-app-dataset
-      MODEL_REPO: dhani10/tourism-model
-      SPACE_ID: dhani10/tourism-app
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}           # set this in repo Settings → Secrets
+      DATASET_REPO: dhani10/tourism-app-dataset   # change if needed
+      MODEL_REPO:   dhani10/tourism-model         # change if needed
+      SPACE_ID:     dhani10/tourism-app           # change if needed
+      MODEL_FILE:   model/best_model.joblib
 
     steps:
       - name: Checkout repository
@@ -40,41 +40,33 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # Fallback in case requirements.txt is missing
             pip install pandas numpy scikit-learn datasets huggingface_hub joblib streamlit
           fi
           pip list
 
       # ---------- DATA PREPARATION ----------
       - name: Run Data Preparation
-        run: |
-          python scripts/data_prep.py
+        run: python scripts/data_prep.py
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ env.HF_TOKEN }}
           DATASET_REPO: ${{ env.DATASET_REPO }}
 
       # ---------- TRAIN + REGISTER MODEL ----------
       - name: Run Model Training and Registration
-        run: |
-          python scripts/train_and_register.py
+        run: python scripts/train_and_register.py
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ env.HF_TOKEN }}
           DATASET_REPO: ${{ env.DATASET_REPO }}
-          MODEL_REPO: ${{ env.MODEL_REPO }}
+          MODEL_REPO:   ${{ env.MODEL_REPO }}
 
       # ---------- DEPLOY TO HF SPACES ----------
       - name: Deploy to Hugging Face Spaces
         if: ${{ env.HF_TOKEN != '' }}
-        run: |
-          python scripts/deploy_to_hf_space.py
+        run: python scripts/deploy_to_hf_space.py
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          SPACE_ID: ${{ env.SPACE_ID }}
+          HF_TOKEN:   ${{ env.HF_TOKEN }}
+          SPACE_ID:   ${{ env.SPACE_ID }}
           MODEL_REPO: ${{ env.MODEL_REPO }}
-
-      # (Optional) Upload logs/artifacts if you generate any
-      # - name: Upload artifacts
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: pipeline-artifacts
-      #     path: artifacts/**
+          MODEL_FILE: ${{ env.MODEL_FILE }}
+          # Optional: set UPLOAD_DIR if your Space files live in a subfolder, e.g. "space"
+          # UPLOAD_DIR: space
