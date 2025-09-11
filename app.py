@@ -1,20 +1,26 @@
 import os
 import joblib
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
 from huggingface_hub import hf_hub_download, login
 
-# MUST be the first Streamlit command
-st.set_page_config(page_title="Tourism Wellness Package Predictor", layout="centered")
+# ──────────────────────────────────────────────────────────────────────────────
+# Streamlit page config MUST be the very first Streamlit call on the page
+# (use a guard so it only runs once, even on reruns).
+# ──────────────────────────────────────────────────────────────────────────────
+if "_page_config_set" not in st.session_state:
+    st.set_page_config(page_title="Tourism Wellness Package Predictor", layout="centered")
+    st.session_state["_page_config_set"] = True
 
-# ----------------------------
-# HF auth & writable cache (/tmp)
-# ----------------------------
-HF_TOKEN = os.getenv("HF_TOKEN")  # Space secret if needed
+# ──────────────────────────────────────────────────────────────────────────────
+# HF Hub config & auth
+# ──────────────────────────────────────────────────────────────────────────────
+HF_TOKEN = os.getenv("HF_TOKEN")  # optional if model repo is public
 HF_MODEL_REPO = os.getenv("HF_MODEL_REPO", "dhani10/tourism-model")
 MODEL_FILE = os.getenv("MODEL_FILE", "model/best_model.joblib")
 
+# Writable caches on Spaces
 HF_CACHE_ROOT = os.getenv("HF_HOME", "/tmp/huggingface")
 os.environ["HF_HOME"] = HF_CACHE_ROOT
 os.environ["HF_HUB_CACHE"] = os.path.join(HF_CACHE_ROOT, "hub")
@@ -22,12 +28,16 @@ os.environ["TRANSFORMERS_CACHE"] = os.path.join(HF_CACHE_ROOT, "transformers")
 for d in (HF_CACHE_ROOT, os.environ["HF_HUB_CACHE"], os.environ["TRANSFORMERS_CACHE"]):
     os.makedirs(d, exist_ok=True)
 
+# Login if token present (private repos)
 if HF_TOKEN:
     try:
         login(token=HF_TOKEN)
     except Exception:
         pass
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Load model from the Hub (cached)
+# ──────────────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
     local_path = hf_hub_download(
@@ -41,14 +51,15 @@ def load_model():
 
 model = load_model()
 
-# ----------------------------
-# Helper: read expected input columns from preprocessor
-# ----------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper: get the raw input feature names the ColumnTransformer expects
+# ──────────────────────────────────────────────────────────────────────────────
 def get_expected_input_columns(clf):
     pre = clf.named_steps.get("preprocessor")
     cols = []
     if pre is None:
         return cols
+    # Works both before and after fit
     transformers = getattr(pre, "transformers", None) or getattr(pre, "transformers_", [])
     for _, _, selected in transformers:
         if selected in (None, "drop"):
@@ -57,34 +68,37 @@ def get_expected_input_columns(clf):
             cols.extend(selected)
         elif isinstance(selected, (tuple, np.ndarray, pd.Index)):
             cols.extend(list(selected))
-    # preserve order + unique
-    seen = set()
-    ordered = []
-    for c in cols:
-        if c not in seen:
-            seen.add(c)
-            ordered.append(c)
-    return ordered
+    # unique, preserve order
+    return list(dict.fromkeys(cols))
 
 EXPECTED_COLS = get_expected_input_columns(model)
 
-# ----------------------------
-# Streamlit UI (collect ALL training features)
-# ----------------------------
-st.set_page_config(page_title="Tourism Wellness Package Predictor", layout="centered")
-st.title("Wellness Tourism Package Predictor")
+# Known categorical feature names from your dataset
+CAT_FEATURES = {
+    "TypeofContact", "Occupation", "Gender", "ProductPitched",
+    "MaritalStatus", "Designation"
+}
+# Reasonable defaults for features we don't expose explicitly
+CAT_DEFAULT = "Unknown"
+NUM_DEFAULT = 0
+
+# ──────────────────────────────────────────────────────────────────────────────
+# UI
+# ──────────────────────────────────────────────────────────────────────────────
+st.title("Tourism Wellness Package Predictor")
 st.caption("Fill in customer details to predict purchase likelihood.")
 
-# Categorical options — match dataset spellings exactly
-TYPE_OF_CONTACT_OPTS = ["Company Invited", "Self Enquiry"]  # <- dataset text
-OCCUPATION_OPTS      = ["Salaried", "Small Business", "Freelancer", "Large Business", "Other"]
+# Categorical options (adjust if your dataset vocabulary differs)
+TYPE_OF_CONTACT_OPTS = ["Company Invited", "Self Inquiry"]
+OCCUPATION_OPTS      = ["Salaried", "Freelancer", "Other"]
 GENDER_OPTS          = ["Male", "Female"]
-PRODUCT_PITCHED_OPTS = ["Basic", "Deluxe", "Standard", "Super Deluxe", "King"]  # dataset list
-MARITAL_STATUS_OPTS  = ["Single", "Married", "Divorced", "Unmarried"]           # dataset used "Unmarried"
-DESIGNATION_OPTS     = ["Executive", "Senior Executive", "Manager", "Senior Manager", "AVP", "VP", "Director", "Junior Executive"]
+PRODUCT_PITCHED_OPTS = ["Basic", "Deluxe", "King", "Standard", "Super Deluxe", "Elite"]
+MARITAL_STATUS_OPTS  = ["Single", "Married", "Divorced"]
+DESIGNATION_OPTS     = ["Executive", "Manager", "Senior Manager", "AVP", "VP"]
 
 with st.form("predict_form"):
     col1, col2 = st.columns(2)
+
     with col1:
         Age = st.number_input("Age", min_value=18, max_value=100, value=30)
         TypeofContact = st.selectbox("Type of Contact", TYPE_OF_CONTACT_OPTS)
@@ -110,7 +124,7 @@ with st.form("predict_form"):
     submitted = st.form_submit_button("Predict")
 
 if submitted:
-    # Build UI row (exact training column names)
+    # User-provided features
     ui_row = {
         "Age": Age,
         "TypeofContact": TypeofContact,
@@ -132,34 +146,26 @@ if submitted:
         "MonthlyIncome": float(MonthlyIncome),
     }
 
-    # Fallback if EXPECTED_COLS couldn't be read for some reason
-    base_cols = EXPECTED_COLS if EXPECTED_COLS else list(ui_row.keys())
+    # Build a 1-row frame with EXACTLY the expected columns:
+    # 1) Start from defaults (avoid NaNs)
+    defaults = {}
+    for c in EXPECTED_COLS:
+        if c in CAT_FEATURES:
+            defaults[c] = CAT_DEFAULT
+        else:
+            defaults[c] = NUM_DEFAULT
+    row = pd.DataFrame({k: [v] for k, v in defaults.items()})
 
-    # Start with expected columns set to NaN, then overlay UI values
-    template = {c: [np.nan] for c in base_cols}
-    row = pd.DataFrame(template)
+    # 2) Overlay user inputs where available
     for k, v in ui_row.items():
         if k in row.columns:
             row.at[0, k] = v
 
-    # Coerce numerics (safeguard)
-    numeric_cols = [
-        "Age", "CityTier", "DurationOfPitch", "NumberOfPersonVisiting", "NumberOfFollowups",
-        "PreferredPropertyStar", "NumberOfTrips", "Passport", "PitchSatisfactionScore",
-        "OwnCar", "NumberOfChildrenVisiting", "MonthlyIncome",
-    ]
-    for c in numeric_cols:
-        if c in row.columns:
-            row[c] = pd.to_numeric(row[c], errors="coerce")
-
-    # Optional: if your pipeline didn't add imputers, simple fill for numerics
-    for c in numeric_cols:
-        if c in row.columns and pd.isna(row.at[0, c]):
-            row.at[0, c] = 0
-
     try:
         pred = model.predict(row)[0]
-        proba = float(model.predict_proba(row)[0, 1]) if hasattr(model, "predict_proba") else None
+        proba = None
+        if hasattr(model, "predict_proba"):
+            proba = float(model.predict_proba(row)[0, 1])
 
         st.subheader("Result")
         if pred == 1:
@@ -168,13 +174,9 @@ if submitted:
             st.error(f"Not likely to purchase (confidence: {1 - proba:.2f})" if proba is not None else "Not likely to purchase")
 
         with st.expander("Inputs sent to model"):
-            st.dataframe(row)
-
-        if not EXPECTED_COLS:
-            st.info("Note: EXPECTED_COLS could not be read from the pipeline; used UI keys as fallback.")
+            st.write(row)
 
     except Exception as e:
         st.error(f"Prediction failed: {e}")
-        with st.expander("Debug"):
-            st.write("Expected columns:", EXPECTED_COLS)
-            st.dataframe(row)
+        with st.expander("Debug: expected raw feature names"):
+            st.write(EXPECTED_COLS)
