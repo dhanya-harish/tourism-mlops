@@ -9,12 +9,14 @@ jobs:
   run-pipeline:
     runs-on: ubuntu-latest
 
+    # Global env you can tweak
     env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}           # set this in repo Settings → Secrets
-      DATASET_REPO: dhani10/tourism-app-dataset   # change if needed
-      MODEL_REPO:   dhani10/tourism-model         # change if needed
-      SPACE_ID:     dhani10/tourism-app           # change if needed
-      MODEL_FILE:   model/best_model.joblib
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}          # set in repo Settings → Secrets and variables → Actions
+      DATASET_REPO: dhani10/tourism-app-dataset  # HF Dataset repo id
+      MODEL_REPO:   dhani10/tourism-model        # HF Model repo id
+      SPACE_ID:     dhani10/tourism-app          # HF Space id
+      MODEL_FILE:   model/best_model.joblib      # path inside model repo to the artifact
+      # UPLOAD_DIR: space                        # optional: folder to upload to Space (defaults to repo root if missing)
 
     steps:
       - name: Checkout repository
@@ -37,36 +39,42 @@ jobs:
         run: |
           python -V
           pip install --upgrade pip
+          # Ensure modern hub client to avoid 'space_sdk required' issues
+          pip install --upgrade "huggingface_hub>=0.23" "datasets>=2.18"
+          # Base libs (safe if already present)
+          pip install -U pandas numpy scikit-learn joblib streamlit
+          # If you keep a requirements.txt, install it too
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
-            pip install pandas numpy scikit-learn datasets huggingface_hub joblib streamlit
           fi
           pip list
 
       # ---------- DATA PREPARATION ----------
       - name: Run Data Preparation
-        run: python scripts/data_prep.py
+        run: |
+          python scripts/data_prep.py
         env:
-          HF_TOKEN: ${{ env.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DATASET_REPO: ${{ env.DATASET_REPO }}
 
       # ---------- TRAIN + REGISTER MODEL ----------
       - name: Run Model Training and Registration
-        run: python scripts/train_and_register.py
+        run: |
+          python scripts/train_and_register.py
         env:
-          HF_TOKEN: ${{ env.HF_TOKEN }}
+          HF_TOKEN:     ${{ secrets.HF_TOKEN }}
           DATASET_REPO: ${{ env.DATASET_REPO }}
           MODEL_REPO:   ${{ env.MODEL_REPO }}
+          MODEL_FILE:   ${{ env.MODEL_FILE }}
 
       # ---------- DEPLOY TO HF SPACES ----------
       - name: Deploy to Hugging Face Spaces
         if: ${{ env.HF_TOKEN != '' }}
-        run: python scripts/deploy_to_hf_space.py
+        run: |
+          python scripts/deploy_to_hf_space.py
         env:
-          HF_TOKEN:   ${{ env.HF_TOKEN }}
+          HF_TOKEN:   ${{ secrets.HF_TOKEN }}
           SPACE_ID:   ${{ env.SPACE_ID }}
           MODEL_REPO: ${{ env.MODEL_REPO }}
           MODEL_FILE: ${{ env.MODEL_FILE }}
-          # Optional: set UPLOAD_DIR if your Space files live in a subfolder, e.g. "space"
-          # UPLOAD_DIR: space
+          # UPLOAD_DIR: ${{ env.UPLOAD_DIR }}   # uncomment if you set one
