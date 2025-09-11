@@ -1,152 +1,138 @@
 #!/usr/bin/env python3
 """
-Deploy (or update) a Hugging Face Space.
+Deploy files to a Hugging Face Space.
 
-Usage examples
---------------
-# Streamlit SDK Space (app.py + requirements.txt)
-python deploy_to_hf_space.py --space-id dhani10/tourism-app --sdk streamlit \
-  --path . --hardware cpu-basic \
-  --set-secret HF_TOKEN=$HF_TOKEN \
-  --set-var HF_MODEL_REPO=dhani10/tourism-model --set-var MODEL_FILE=model/best_model.joblib
-
-# Docker Space (Dockerfile + app.py + requirements.txt)
-python deploy_to_hf_space.py --space-id dhani10/tourism-app --sdk docker \
-  --path . --hardware cpu-basic \
-  --set-secret HF_TOKEN=$HF_TOKEN \
-  --set-var HF_MODEL_REPO=dhani10/tourism-model --set-var MODEL_FILE=model/best_model.joblib
+Usage (matches your workflow step):
+  python deploy_to_hf_space.py \
+    --space-id dhani10/tourism-app \
+    --sdk streamlit \
+    --hardware cpu-basic \
+    --path . \
+    --set-secret HF_TOKEN=$HF_TOKEN \
+    --set-var HF_MODEL_REPO=dhani10/tourism-model \
+    --set-var MODEL_FILE=model/best_model.joblib
 """
 
 import argparse
 import os
-import sys
 from pathlib import Path
-from typing import List, Tuple
+from huggingface_hub import login, HfApi, create_repo, upload_folder
+from huggingface_hub.utils import HfHubHTTPError
 
-from huggingface_hub import HfApi, login, create_repo, upload_file
-
-SUPPORTED_SDKS = {"streamlit", "gradio", "docker"}
-DEFAULT_INCLUDE = {
-    "streamlit": ["app.py", "requirements.txt"],
-    "gradio":    ["app.py", "requirements.txt"],
-    "docker":    ["Dockerfile", "app.py", "requirements.txt"],
-}
-
-def parse_kv(items: List[str]) -> List[Tuple[str, str]]:
-    """Parse KEY=VALUE pairs."""
-    kv_list = []
-    for item in items or []:
-        if "=" not in item:
-            raise ValueError(f"Expected KEY=VALUE for: {item}")
-        k, v = item.split("=", 1)
-        kv_list.append((k.strip(), v.strip()))
-    return kv_list
+def parse_kv_list(items):
+    """Convert ["KEY=VALUE", ...] into dict."""
+    out = {}
+    if not items:
+        return out
+    for s in items:
+        if "=" not in s:
+            raise argparse.ArgumentTypeError(f"Expected KEY=VALUE, got: {s}")
+        k, v = s.split("=", 1)
+        out[k] = v
+    return out
 
 def main():
-    p = argparse.ArgumentParser(description="Deploy to Hugging Face Space")
-    p.add_argument("--space-id", required=True, help="e.g., 'dhani10/tourism-app'")
-    p.add_argument("--sdk", choices=SUPPORTED_SDKS, default="streamlit",
-                   help="Space runtime: streamlit | gradio | docker")
+    p = argparse.ArgumentParser()
+    p.add_argument("--space-id", required=True, help="e.g. user/space-name")
+    p.add_argument("--path", default=".", help="Folder to upload (default: .)")
+    p.add_argument("--sdk", choices=["streamlit", "docker"], default="streamlit",
+                   help="Space runtime SDK (default: streamlit)")
     p.add_argument("--hardware", default="cpu-basic",
-                   help="Space hardware: cpu-basic (default), t4-small, a10g-large, etc.")
-    p.add_argument("--path", default=".", help="Folder to upload files from")
-    p.add_argument("--include", nargs="*", default=None,
-                   help="Specific files to upload (defaults depend on runtime)")
-    p.add_argument("--private", action="store_true", help="Create Space as private")
-    p.add_argument("--token", default=os.getenv("HF_TOKEN"),
-                   help="HF token (or set env HF_TOKEN)")
-    p.add_argument("--set-secret", nargs="*", default=[],
-                   help="Space secrets to set: KEY=VALUE (e.g., HF_TOKEN=...)")
-    p.add_argument("--set-var", nargs="*", default=[],
-                   help="Space variables to set: KEY=VALUE (visible env vars)")
-
+                   help="Space hardware (e.g. cpu-basic, t4-small)")
+    p.add_argument("--set-secret", nargs="*", help="Secrets as KEY=VALUE")
+    p.add_argument("--set-var", nargs="*", help="Variables as KEY=VALUE")
     args = p.parse_args()
 
-    if not args.token:
-        print("ERROR: Provide a Hugging Face token via --token or env HF_TOKEN", file=sys.stderr)
-        sys.exit(1)
+    hf_token = os.getenv("HF_TOKEN")
+    if not hf_token:
+        raise SystemExit("HF_TOKEN env var is required (GitHub Secret).")
+
+    login(token=hf_token)
+    api = HfApi(token=hf_token)
 
     space_id = args.space_id
-    sdk = args.sdk
-    path = Path(args.path)
-    include = args.include or DEFAULT_INCLUDE[sdk]
-    include_paths = [path / f for f in include]
+    root = Path(args.path).resolve()
 
-    # Sanity checks
-    missing = [str(p) for p in include_paths if not p.exists()]
-    if missing:
-        print("ERROR: Missing required files:\n  - " + "\n  - ".join(missing), file=sys.stderr)
-        sys.exit(1)
+    # Create or ensure Space exists (avoid passing sdk at creation on older hubs)
+    try:
+        exists = api.repo_exists(space_id, repo_type="space")
+    except Exception:
+        exists = False
 
-    # Login
-    print("🔐 Logging in to Hugging Face Hub…")
-    login(args.token)
+    if not exists:
+        try:
+            create_repo(
+                repo_id=space_id,
+                repo_type="space",
+                private=True,
+                exist_ok=False,
+                token=hf_token,
+            )
+            print(f"[info] Created Space: {space_id}")
+        except HfHubHTTPError as e:
+            if "already exists" in str(e).lower():
+                print("[info] Space already exists.")
+            else:
+                print(f"[warn] create_repo: {e}")
 
-    api = HfApi()
-
-    # Create Space (or ensure it exists) with proper SDK + hardware
-    print(f"🚀 Creating/ensuring Space '{space_id}' (sdk={sdk}, hardware={args.hardware})…")
-    # create_repo supports setting Space meta on creation time
-    create_repo(
-        repo_id=space_id,
-        repo_type="space",
-        exist_ok=True,
-        private=args.private,
-        space_sdk=sdk,
-        space_hardware=args.hardware,
-        token=args.token,
-    )
-
-    # If you need to change SDK/hardware after creation, you can re-call create_repo with same params.
-
-    # Set secrets (encrypted, not visible to users)
-    for key, value in parse_kv(args.set_secret):
-        print(f"🔑 Setting secret: {key}")
-        api.add_space_secret(repo_id=space_id, key=key, value=value, token=args.token)
-
-    # Set variables (plain env vars visible in UI)
-    for key, value in parse_kv(args.set_var):
-        print(f"🧩 Setting variable: {key}={value}")
-        api.add_space_variable(repo_id=space_id, key=key, value=value, token=args.token)
+    # Try to set runtime (newer client supports update_space_runtime)
+    try:
+        api.update_space_runtime(
+            repo_id=space_id,
+            sdk=args.sdk,
+            hardware=args.hardware,
+            token=hf_token,
+        )
+        print(f"[info] Runtime set: sdk={args.sdk}, hw={args.hardware}")
+    except Exception as e:
+        print(f"[info] update_space_runtime not available or failed: {e}")
 
     # Upload files
-    print("📤 Uploading files:")
-    for pth in include_paths:
-        rel = pth.relative_to(path).as_posix()
-        print(f"  - {rel}")
-        upload_file(
-            path_or_fileobj=str(pth),
-            path_in_repo=rel,
-            repo_id=space_id,
-            repo_type="space",
-            token=args.token,
-        )
+    if not root.exists():
+        raise SystemExit(f"Path not found: {root}")
 
-    # Optional: upload everything under `assets/` (if exists)
-    assets_dir = path / "assets"
-    if assets_dir.exists() and assets_dir.is_dir():
-        for fp in assets_dir.rglob("*"):
-            if fp.is_file():
-                rel = fp.relative_to(path).as_posix()
-                print(f"  - {rel}")
-                upload_file(
-                    path_or_fileobj=str(fp),
-                    path_in_repo=rel,
-                    repo_id=space_id,
-                    repo_type="space",
-                    token=args.token,
-                )
+    # If using Streamlit SDK, make sure only needed files are present
+    # (app.py and requirements.txt at minimum). This avoids accidental Docker use.
+    if args.sdk == "streamlit":
+        must_have = ["app.py", "requirements.txt"]
+        missing = [f for f in must_have if not (root / f).exists()]
+        if missing:
+            raise SystemExit(f"Missing required files for Streamlit SDK: {missing}")
+        # Warn if a Dockerfile is present (it would force Docker runtime)
+        if (root / "Dockerfile").exists():
+            print("[warn] Dockerfile found. Delete it to ensure Streamlit SDK is used.")
 
-    # Restart Space to pick new commit
-    print("🔁 Restarting Space…")
+    upload_folder(
+        folder_path=str(root),
+        repo_id=space_id,
+        repo_type="space",
+        token=hf_token,
+    )
+    print("[info] Files uploaded.")
+
+    # Add secrets and variables if provided
+    for k, v in parse_kv_list(args.set_secret).items():
+        try:
+            api.add_space_secret(repo_id=space_id, key=k, value=v)
+            print(f"[info] Secret set: {k}")
+        except Exception as e:
+            print(f"[warn] add_space_secret({k}): {e}")
+
+    for k, v in parse_kv_list(args.set_var).items():
+        try:
+            api.add_space_variable(repo_id=space_id, key=k, value=v)
+            print(f"[info] Variable set: {k}={v}")
+        except Exception as e:
+            print(f"[warn] add_space_variable({k}): {e}")
+
+    # Restart Space (best effort)
     try:
-        api.restart_space(repo_id=space_id, token=args.token)
+        api.restart_space(repo_id=space_id, token=hf_token)
+        print("[info] Space restart requested.")
     except Exception as e:
-        # Not fatal: Space will rebuild automatically on commit anyway
-        print(f"(info) restart_space not available or failed: {e}")
+        print(f"[info] restart_space not available or failed: {e}")
 
-    app_url = f"https://huggingface.co/spaces/{space_id}"
-    print(f"✅ Done. Space URL: {app_url}")
+    print(f"✅ Deployed to https://huggingface.co/spaces/{space_id}")
 
 if __name__ == "__main__":
     main()
